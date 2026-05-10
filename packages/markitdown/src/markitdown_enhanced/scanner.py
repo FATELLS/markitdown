@@ -102,7 +102,9 @@ def is_scanned_pdf(file_path: str) -> bool:
     """
     用PyMuPDF检测PDF是否为纯扫描件
 
-    判断标准：所有页面提取文本均<50字符
+    判断标准：平均每页可提取文本 < 100 字符视为扫描件。
+    但如果任何单页 >= 200 字符，则认为包含有效文本，不是扫描件。
+    这样可以避免截图PDF（每页仅少量OCR残留）被误判为有文字。
 
     Args:
         file_path: PDF文件路径
@@ -118,16 +120,23 @@ def is_scanned_pdf(file_path: str) -> bool:
 
     try:
         doc = fitz.open(file_path)
+        page_count = doc.page_count
+        if page_count == 0:
+            doc.close()
+            return False
+
         total_chars = 0
         for page in doc:
             text = page.get_text().strip()
             total_chars += len(text)
-            # 优化：如果某页有足够文本，就不是扫描件
-            if len(text) >= 50:
+            # 如果某页有足够多文本，肯定不是扫描件
+            if len(text) >= 200:
                 doc.close()
                 return False
         doc.close()
-        return total_chars < 50
+
+        avg_chars = total_chars / page_count
+        return avg_chars < 100
     except Exception as e:
         log.warning("检测扫描件失败: %s — %s", file_path, e)
         return False
