@@ -20,6 +20,7 @@ def generate_doc_obj(
     doc_type_override: str = None,
     extractor_override: str = None,
     content_status: str = None,
+    interpret_result: dict = None,
 ) -> str:
     """
     生成 document_obj Markdown文件
@@ -45,6 +46,19 @@ def generate_doc_obj(
 
     [Markdown正文]
 
+    当提供interpret_result时，body格式变为：
+    # 标题
+
+    ## 关键词
+
+    ## 摘要
+
+    ## 内容概述
+
+    ---
+
+    [Markdown正文（无损层）]
+
     Args:
         file_path: 原始文件路径
         md_content: 清理后的Markdown正文
@@ -53,6 +67,7 @@ def generate_doc_obj(
         doc_type_override: 覆盖文件类型
         extractor_override: 覆盖提取器名称
         content_status: 内容状态标记 (如 "scanned_image")
+        interpret_result: LLM可解释提取结果 {"summary": str, "sections": [...]}
 
     Returns:
         输出文件路径
@@ -91,6 +106,27 @@ def generate_doc_obj(
     body_lines = [f"# {name}", ""]
     if keywords:
         body_lines.extend(["## 关键词", "", keywords, ""])
+
+    # 可解释层（如果提供）
+    if interpret_result:
+        # 摘要
+        summary = interpret_result.get("summary", "")
+        if summary:
+            body_lines.extend(["## 摘要", "", summary, ""])
+
+        # 内容概述
+        sections = interpret_result.get("sections", [])
+        if sections:
+            body_lines.extend(["## 内容概述", ""])
+            for section in sections:
+                title = section.get("title", "")
+                section_summary = section.get("summary", "")
+                body_lines.append(f"### {title}")
+                if section_summary:
+                    body_lines.extend(["", section_summary, ""])
+                else:
+                    body_lines.append("")
+
     body_lines.extend(["---", "", md_content])
     body = "\n".join(body_lines)
 

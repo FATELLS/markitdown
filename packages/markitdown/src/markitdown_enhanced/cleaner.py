@@ -2,6 +2,7 @@
 cleaner.py — Markdown后处理清理管线
 
 处理顺序:
+0. PPTX特有噪声清理（Slide标记、纯数字页码）
 1. 删除 <!-- image --> 及其前后空行
 2. 删除 MarkitDown 元数据行
 3. 删除 SMTP 邮件头
@@ -11,18 +12,82 @@ cleaner.py — Markdown后处理清理管线
 7. 重复标签去重
 8. 超长行处理 (按|拆分表格或截断)
 9. 连续空行压缩
-10. 行尾空白清理
-11. 纯页码行删除
-12. 空目录项清理
-13. 长分隔线清理
-14. 版权声明块删除
-15. 大文档截断(aggressive模式)
+10. 模板噪音过滤（跨页重复短行去重）
+11. 行尾空白清理
+12. 纯页码行删除
+13. 空目录项清理
+14. 长分隔线清理
+15. 版权声明块删除
+16. 大文档截断(aggressive模式)
 """
 
 import re
 import logging
 
 log = logging.getLogger("markitdown_enhanced.cleaner")
+
+
+def _remove_pptx_noise(md_text: str) -> str:
+    """PPTX特有噪声清理：删除Slide标记行和纯数字页码行"""
+    # 删除 <!-- Slide number: X --> 行
+    md_text = re.sub(r'^<!--\s*Slide\s+number\s*:\s*\d+\s*-->\s*$', '', md_text, flags=re.MULTILINE)
+    # 删除纯数字行（页码如 "1", "2"）
+    md_text = re.sub(r'^\d{1,4}\s*$', '', md_text, flags=re.MULTILINE)
+    # 删除 "第X页" 格式
+    md_text = re.sub(r'^第\d+页\s*$', '', md_text, flags=re.MULTILINE)
+    return md_text
+
+
+def deduplicate_template_lines(text: str, min_length: int = 2, max_length: int = 40, min_occurrences: int = 3) -> str:
+    """
+    跨页重复短行去重（模板噪音过滤）。
+
+    统计所有非空行出现次数，长度在 min_length~max_length 之间的短行，
+    出现≥min_occurrences次视为模板噪音并删除。
+
+    排除：以 # 开头的标题行、以 | 开头的表格行、以 ``` 开头的代码块行。
+
+    Args:
+        text: Markdown文本
+        min_length: 最短行长度
+        max_length: 最长行长度
+        min_occurrences: 最少出现次数阈值
+
+    Returns:
+        清理后的文本
+    """
+    lines = text.split('\n')
+
+    # 统计行频次
+    from collections import Counter
+    line_counts = Counter()
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        length = len(stripped)
+        if min_length <= length <= max_length:
+            # 排除标题行、表格行、代码块行
+            if stripped.startswith('#') or stripped.startswith('|') or stripped.startswith('```'):
+                continue
+            line_counts[stripped] += 1
+
+    # 找出模板噪音行
+    noise_lines = {line for line, count in line_counts.items() if count >= min_occurrences}
+
+    if noise_lines:
+        log.debug("模板噪音过滤: 发现%d种重复短行（出现≥%d次）", len(noise_lines), min_occurrences)
+
+    # 过滤
+    cleaned = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped in noise_lines:
+            continue
+        cleaned.append(line)
+
+    return '\n'.join(cleaned)
 
 
 def _remove_html_image_comments(md_text: str) -> str:
@@ -215,6 +280,9 @@ def clean_markdown(md_text: str, aggressive: bool = False) -> str:
     """
     original_len = len(md_text)
 
+    # 0. PPTX特有噪声清理
+    md_text = _remove_pptx_noise(md_text)
+
     # 1. 删除 <!-- image --> 标记
     md_text = _remove_html_image_comments(md_text)
 
@@ -242,25 +310,28 @@ def clean_markdown(md_text: str, aggressive: bool = False) -> str:
     # 9. 连续空行压缩
     md_text = _compress_blank_lines(md_text)
 
-    # 10. 行尾空白清理
+    # 10. 模板噪音过滤（跨页重复短行去重）
+    md_text = deduplicate_template_lines(md_text)
+
+    # 11. 行尾空白清理
     md_text = _strip_trailing_whitespace(md_text)
 
-    # 11. 纯页码行删除
+    # 12. 纯页码行删除
     md_text = _remove_page_numbers(md_text)
 
-    # 12. 空目录项清理
+    # 13. 空目录项清理
     md_text = _remove_empty_toc_items(md_text)
 
-    # 13. 长分隔线清理
+    # 14. 长分隔线清理
     md_text = _remove_long_separators(md_text)
 
-    # 14. 版权声明块删除
+    # 15. 版权声明块删除
     md_text = _remove_copyright_blocks(md_text)
 
-    # 15. 清理后可能产生多余空行，再压缩一次
+    # 16. 清理后可能产生多余空行，再压缩一次
     md_text = _compress_blank_lines(md_text)
 
-    # 16. 大文档截断
+    # 17. 大文档截断
     if aggressive:
         md_text = _truncate_large_doc(md_text)
 
