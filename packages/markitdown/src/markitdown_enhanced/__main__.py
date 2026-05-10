@@ -11,8 +11,7 @@ import sys
 import os
 import logging
 
-from markitdown import MarkItDown
-
+from .converter import DocumentConverter
 from .cleaner import clean_markdown
 from .keywords import extract_keywords
 from .scanner import is_scanned_pdf, validate_file_type
@@ -38,6 +37,8 @@ def main():
     parser.add_argument("--llm-base-url", default=None, help="LLM API地址 (default: from env LLM_BASE_URL)")
     parser.add_argument("--llm-api-key", default=None, help="LLM API密钥 (default: from env LLM_API_KEY)")
     parser.add_argument("--doc-type", default=None, help="覆盖文档类型（pptx/pdf/...）")
+    parser.add_argument("--engine", default="auto",
+                        help="首选转换引擎 (auto/markitdown/docling/pymupdf, default: auto)")
     parser.add_argument("-v", "--verbose", action="store_true", help="详细日志输出")
 
     args = parser.parse_args()
@@ -63,14 +64,13 @@ def main():
 
     log.info("开始处理: %s (类型: %s)", input_path, doc_type)
 
-    # === 步骤1: 文件转换 ===
-    log.info("步骤1: MarkItDown转换...")
+    # === 步骤1: 多引擎文件转换 ===
+    log.info("步骤1: 文档转换 (引擎: %s)...", args.engine)
     try:
-        md = MarkItDown()
-        result = md.convert(input_path)
-        md_text = result.text_content or ""
+        converter = DocumentConverter(preferred_engine=args.engine)
+        md_text = converter.convert(input_path)
     except Exception as e:
-        log.error("MarkItDown转换失败: %s", e)
+        log.error("文档转换失败: %s", e)
         sys.exit(1)
 
     if not md_text.strip():
