@@ -9,10 +9,11 @@ markitdown_enhanced CLI — 文档转换+增强后处理
 import argparse
 import sys
 import os
+import re
 import logging
 
 from .converter import DocumentConverter
-from .cleaner import clean_markdown
+from .cleaner import clean_markdown, replace_base64_images
 from .keywords import extract_keywords
 from .scanner import is_scanned_pdf, validate_file_type
 from .generator import generate_doc_obj
@@ -79,6 +80,86 @@ def main():
 
     log.info("转换完成: %d字符", len(md_text))
 
+    # === 步骤1.5: 图片识别（DOCX从文件直接提取，其他格式处理base64占位符） ===
+    describe_fn = None
+    if args.interpret:
+        log.info("步骤1.5: 检测并识别图片...")
+        try:
+            from .harness import LLMSummarizer
+
+            llm_kwargs = {}
+            if args.llm_provider:
+                llm_kwargs["provider"] = args.llm_provider
+            if args.llm_model:
+                llm_kwargs["model"] = args.llm_model
+            if args.llm_base_url:
+                llm_kwargs["base_url"] = args.llm_base_url
+            if args.llm_api_key:
+                llm_kwargs["api_key"] = args.llm_api_key
+
+            _llm = LLMSummarizer(**llm_kwargs)
+            describe_fn = _llm.describe_image
+
+            # DOCX: 直接从文件提取PNG/JPEG图片，调LLM识别后替换markdown中的占位符
+            if doc_type.lower() == "docx":
+                from .converter import extract_docx_images
+                doc_images = extract_docx_images(input_path)
+                if doc_images:
+                    log.info("开始识别%d张DOCX图片...", len(doc_images))
+                    descriptions = []
+                    for img in doc_images:
+                        import base64 as b64mod
+                        b64_str = b64mod.b64encode(img["data"]).decode("ascii")
+                        desc = _llm.describe_image(b64_str, img["mime_type"])
+                        descriptions.append(desc)
+                        if desc:
+                            log.info("  图片识别成功: %s (%d字)", img.get("alt_text", "")[:30], len(desc))
+                        else:
+                            log.info("  图片识别跳过: %s", img.get("alt_text", "")[:30])
+
+                    # 按顺序替换markdown中的data:image占位符（仅替换同类型）
+                    png_idx = 0
+                    def docx_image_replacer(match):
+                        nonlocal png_idx
+                        alt = match.group(1) or ""
+                        mime = match.group(2)
+                        # EMF占位符直接清理
+                        if "emf" in mime or "wmf" in mime:
+                            if alt:
+                                return f"*[{alt}]*"
+                            return ""
+                        # PNG/JPEG占位符按顺序用LLM描述替换
+                        if png_idx < len(descriptions) and descriptions[png_idx]:
+                            desc = descriptions[png_idx]
+                            png_idx += 1
+                            if alt:
+                                return f"**[{alt}]** {desc}"
+                            return f"*[图片] {desc}*"
+                        else:
+                            png_idx += 1
+                            if alt:
+                                return f"*[图片: {alt}]*"
+                            return "*[图片]*"
+
+                    md_text = re.sub(
+                        r'!\[([^\]]*)\]\(data:(image/[\w.+-]+);base64,?[^)]*\)',
+                        docx_image_replacer,
+                        md_text,
+                    )
+                    log.info("DOCX图片替换完成: %d字符", len(md_text))
+                else:
+                    md_text = replace_base64_images(md_text)
+            else:
+                # 非DOCX: 处理markdown中可能存在的base64图片
+                md_text = replace_base64_images(md_text, describe_fn=describe_fn)
+
+            log.info("图片识别完成: %d字符", len(md_text))
+        except Exception as e:
+            log.warning("图片识别失败，跳过: %s", e)
+            md_text = replace_base64_images(md_text)  # 兜底清理
+    else:
+        md_text = replace_base64_images(md_text)
+
     # === 步骤2: 增强清洗 ===
     log.info("步骤2: 增强清洗...")
     md_text = clean_markdown(md_text, aggressive=args.aggressive)
@@ -97,19 +178,24 @@ def main():
     if args.interpret:
         log.info("步骤4: LLM可解释提取...")
         try:
-            from .harness import LLMSummarizer
+            # 复用步骤2.5创建的LLM实例，避免重复初始化
+            if describe_fn and hasattr(describe_fn, '__self__'):
+                summarizer = describe_fn.__self__
+            else:
+                from .harness import LLMSummarizer
 
-            llm_kwargs = {}
-            if args.llm_provider:
-                llm_kwargs["provider"] = args.llm_provider
-            if args.llm_model:
-                llm_kwargs["model"] = args.llm_model
-            if args.llm_base_url:
-                llm_kwargs["base_url"] = args.llm_base_url
-            if args.llm_api_key:
-                llm_kwargs["api_key"] = args.llm_api_key
+                llm_kwargs = {}
+                if args.llm_provider:
+                    llm_kwargs["provider"] = args.llm_provider
+                if args.llm_model:
+                    llm_kwargs["model"] = args.llm_model
+                if args.llm_base_url:
+                    llm_kwargs["base_url"] = args.llm_base_url
+                if args.llm_api_key:
+                    llm_kwargs["api_key"] = args.llm_api_key
 
-            summarizer = LLMSummarizer(**llm_kwargs)
+                summarizer = LLMSummarizer(**llm_kwargs)
+
             interpret_result = summarizer.summarize(md_text, doc_type=doc_type)
 
             summary_text = interpret_result.get("summary", "")

@@ -265,6 +265,64 @@ def _truncate_large_doc(md_text: str, max_lines: int = 3000) -> str:
     return md_text
 
 
+def replace_base64_images(md_text: str, describe_fn=None, max_images: int = 20) -> str:
+    """
+    处理Markdown中的base64内联图片。
+
+    如果提供了describe_fn回调，对每张图片调用LLM识别并替换为文字描述；
+    否则直接删除base64数据，保留alt text。
+
+    Args:
+        md_text: Markdown文本
+        describe_fn: 回调函数 describe_fn(base64_data, mime_type) -> str
+        max_images: 最多处理图片数量
+
+    Returns:
+        处理后的Markdown文本
+    """
+    # 匹配 ![alt](data:image/xxx;base64,...) 或 ![alt](data:image/xxx;base64...) 格式
+    pattern = re.compile(
+        r'!\[([^\]]*)\]\(data:(image/[\w.+-]+);base64,?[^)]*\)'
+    )
+
+    count = 0
+    replaced = []
+
+    def replacer(match):
+        nonlocal count
+        if count >= max_images:
+            alt = match.group(1) or "图片"
+            return f"*[图片过多，已省略: {alt}]*"
+
+        count += 1
+        alt = match.group(1) or ""
+        mime_type = match.group(2)
+
+        if describe_fn:
+            description = describe_fn(mime_type)
+            if description:
+                if alt:
+                    return f"**[{alt}]** {description}"
+                return f"*[图片] {description}*"
+            else:
+                # LLM识别失败，保留alt text
+                if alt:
+                    return f"*[图片: {alt}]*"
+                return "*[图片]*"
+        else:
+            # 无LLM，直接删除base64，保留alt
+            if alt:
+                return f"*[图片: {alt}]*"
+            return "*[图片]*"
+
+    result = pattern.sub(replacer, md_text)
+
+    if count > 0:
+        log.info("base64图片处理: 共%d张, 已替换", count)
+
+    return result
+
+
 def clean_markdown(md_text: str, aggressive: bool = False) -> str:
     """
     清理Markdown文本中的噪音

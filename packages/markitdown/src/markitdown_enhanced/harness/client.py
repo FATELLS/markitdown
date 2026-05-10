@@ -73,6 +73,78 @@ class LLMSummarizer:
             self.base_url or "(default)",
         )
 
+    def describe_image(
+        self,
+        base64_data: str,
+        mime_type: str = "image/png",
+        max_base64_chars: int = 1_000_000,
+    ) -> str:
+        """
+        使用多模态LLM识别图片内容，返回文字描述。
+
+        智谱(zhipu)provider自动切换到glm-4v-flash视觉模型和/api/paas/v4端点。
+
+        Args:
+            base64_data: base64编码的图片数据（不含data:...;base64,前缀）
+            mime_type: 图片MIME类型 (image/png, image/jpeg, image/x-emf等)
+            max_base64_chars: base64数据最大长度，超出则跳过
+
+        Returns:
+            图片内容描述文本，失败返回空字符串
+        """
+        # EMF等非标准格式无法识别
+        if mime_type not in ("image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp", "image/bmp"):
+            log.debug("跳过不支持的图片格式: %s", mime_type)
+            return ""
+
+        if len(base64_data) > max_base64_chars:
+            log.debug("图片base64过长(%d字符)，跳过", len(base64_data))
+            return ""
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "请用中文简洁描述这张图片中的关键信息。如果是测试报告截图，请提取所有测试数据（数值、结果、配置参数等）。如果是架构图/流程图，请描述关键组件和连接关系。如果是表格截图，请还原表格内容。如果是界面截图，请描述界面元素和关键数据。限制在200字以内。",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{base64_data}"},
+                    },
+                ],
+            }
+        ]
+
+        try:
+            # 智谱视觉模型需要用不同的端点和模型
+            if self.provider == "zhipu":
+                vision_client_kwargs = {"timeout": self.timeout}
+                if self.api_key:
+                    vision_client_kwargs["api_key"] = self.api_key
+                # 智谱视觉API端点是 /api/paas/v4（不是 /api/coding/paas/v4）
+                vision_base = (self.base_url or "").replace("/coding/", "/")
+                vision_client_kwargs["base_url"] = vision_base or "https://open.bigmodel.cn/api/paas/v4"
+                vision_client = OpenAI(**vision_client_kwargs)
+                vision_model = "glm-4v-flash"
+            else:
+                vision_client = self.client
+                vision_model = self.model
+
+            response = vision_client.chat.completions.create(
+                model=vision_model,
+                messages=messages,
+                max_tokens=512,
+                temperature=0.2,
+            )
+            description = response.choices[0].message.content.strip()
+            log.info("图片识别完成(vision_model=%s): %d字", vision_model, len(description))
+            return description
+        except Exception as e:
+            log.warning("图片识别失败: %s", e)
+            return ""
+
     def summarize(
         self,
         text: str,

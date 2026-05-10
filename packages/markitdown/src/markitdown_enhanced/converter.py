@@ -300,3 +300,55 @@ class DocumentConverter:
         except Exception as e:
             log.debug("python-pptx异常: %s", e)
             return None
+
+
+def extract_docx_images(file_path: str) -> list:
+    """
+    从DOCX文件中直接提取嵌入的PNG/JPEG图片。
+
+    Args:
+        file_path: DOCX文件路径
+
+    Returns:
+        按文档顺序排列的图片列表:
+        [{"mime_type": str, "data": bytes, "alt_text": str}, ...]
+        仅返回PNG/JPEG格式，跳过EMF/WMF等不可识别格式。
+    """
+    try:
+        from docx import Document
+    except ImportError:
+        log.debug("python-docx未安装，跳过DOCX图片提取")
+        return []
+
+    images = []
+    try:
+        doc = Document(file_path)
+
+        # 按文档顺序遍历paragraph中的inline shapes
+        for para in doc.paragraphs:
+            for run in para.runs:
+                if run._element.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing'):
+                    # 这个run包含图片，查找对应的relationship
+                    drawings = run._element.findall('.//{http://schemas.openxmlformats.org/drawingml/2006/main}blip')
+                    for blip in drawings:
+                        embed_id = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+                        if embed_id and embed_id in doc.part.rels:
+                            rel = doc.part.rels[embed_id]
+                            ct = rel.target_part.content_type
+                            if ct in ("image/png", "image/jpeg", "image/jpg"):
+                                blob = rel.target_part.blob
+                                # 获取alt text
+                                alt = ""
+                                desc_elems = blip.getparent().findall('.//{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}docPr')
+                                if desc_elems:
+                                    alt = desc_elems[0].get('descr', '') or desc_elems[0].get('name', '')
+                                images.append({
+                                    "mime_type": ct,
+                                    "data": blob,
+                                    "alt_text": alt,
+                                })
+    except Exception as e:
+        log.warning("DOCX图片提取异常: %s", e)
+
+    log.info("DOCX图片提取: 共%d张PNG/JPEG (跳过EMF/WMF)", len(images))
+    return images
