@@ -58,6 +58,10 @@ outlook = ["olefile"]
 audio-transcription = ["pydub", "SpeechRecognition"]
 youtube-transcription = ["youtube-transcript-api"]
 az-doc-intel = ["azure-ai-documentintelligence", "azure-identity"]
+enhanced = [
+    "jieba",
+    "pymupdf",
+]
 
 [project.urls]
 Documentation = "https://github.com/microsoft/markitdown#readme"
@@ -109,4 +113,4 @@ exclude_lines = [
 ]
 
 [tool.hatch.build.targets.sdist]
-only-include = ["src/markitdown"]
+only-include = ["src/markitdown", "src/markitdown_enhanced"]
