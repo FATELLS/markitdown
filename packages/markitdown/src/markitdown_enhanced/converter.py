@@ -14,6 +14,7 @@ import logging
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -352,3 +353,145 @@ def extract_docx_images(file_path: str) -> list:
 
     log.info("DOCX图片提取: 共%d张PNG/JPEG (跳过EMF/WMF)", len(images))
     return images
+
+
+# ============================================================================
+# PPTX 视觉提取管线
+# ============================================================================
+
+_PPTX_VISION_PROMPT = """请详细描述这页PPT的内容，用简洁的结构化文本输出。
+
+要求：
+1. 先写页面标题（如有）
+2. 列出所有可见文字内容（包括标注、注释、数据标签）
+3. 描述图表类型（柱状图/饼图/流程图/架构图/表格等）及关键数据点
+4. 如有截图，描述截图中的关键信息
+5. 保留所有数字、百分比、金额等量化数据
+
+直接输出自然语言描述，不要用JSON格式。"""
+
+
+def extract_pptx_vision(
+    pptx_path: str,
+    describe_fn=None,
+    dpi: int = 150,
+    max_workers: int = 4,
+) -> str:
+    """
+    PPTX → PDF → 逐页图片 → 视觉LLM → 合并描述
+
+    比python-pptx纯文字提取更完整，能识别图表、架构图、截图等视觉内容。
+
+    Args:
+        pptx_path: PPTX文件路径
+        describe_fn: 视觉描述函数，签名 describe_fn(base64_str, mime_type) -> str
+        dpi: 渲染DPI，150足够清晰且传输快
+        max_workers: 并发识别线程数
+
+    Returns:
+        合并后的逐页描述Markdown文本
+    """
+    import tempfile
+    import subprocess
+    import base64 as b64mod
+    import concurrent.futures
+    import fitz  # PyMuPDF
+
+    LIBREOFFICE = "/opt/homebrew/bin/soffice"
+
+    # 1. PPTX → PDF
+    log.info("[视觉管线] PPTX→PDF: %s", os.path.basename(pptx_path))
+    tmp_dir = tempfile.mkdtemp(prefix="pptx_vision_")
+
+    try:
+        result = subprocess.run(
+            [LIBREOFFICE, "--headless", "--convert-to", "pdf", "--outdir", tmp_dir, pptx_path],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"LibreOffice失败: {result.stderr[:200]}")
+
+        pdf_name = Path(pptx_path).stem + ".pdf"
+        pdf_path = os.path.join(tmp_dir, pdf_name)
+        if not os.path.isfile(pdf_path):
+            raise RuntimeError(f"PDF未生成: {pdf_path}")
+
+        # 2. PDF → 逐页PNG
+        log.info("[视觉管线] PDF→图片...")
+        doc = fitz.open(pdf_path)
+        zoom = dpi / 72
+        mat = fitz.Matrix(zoom, zoom)
+
+        image_paths = []
+        for i in range(len(doc)):
+            page = doc[i]
+            pix = page.get_pixmap(matrix=mat)
+            img_path = os.path.join(tmp_dir, f"page_{i+1:03d}.png")
+            pix.save(img_path)
+            image_paths.append(img_path)
+        doc.close()
+        log.info("[视觉管线] %d页图片", len(image_paths))
+
+        # 3. 逐页视觉识别
+        total = len(image_paths)
+        page_results = [None] * total
+
+        def _describe_page(page_idx):
+            if not describe_fn:
+                return f"[第{page_idx+1}页 - 无视觉识别函数]"
+            with open(image_paths[page_idx], "rb") as f:
+                img_b64 = b64mod.b64encode(f.read()).decode()
+            try:
+                # 调用视觉LLM（带prompt）
+                from .harness.client import LLMSummarizer
+                # describe_fn 是绑定方法，访问self获取client
+                client = describe_fn.__self__.client if hasattr(describe_fn, '__self__') else None
+                if client:
+                    resp = client.chat.completions.create(
+                        model=describe_fn.__self__.vision_model if hasattr(describe_fn.__self__, 'vision_model') else "glm-4v-flash",
+                        messages=[{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": _PPTX_VISION_PROMPT},
+                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                            ]
+                        }],
+                        max_tokens=1000,
+                        temperature=0.1,
+                    )
+                    return resp.choices[0].message.content.strip()
+                else:
+                    return describe_fn(img_b64, "image/png")
+            except Exception as e:
+                log.warning("[视觉管线] 第%d页识别失败: %s", page_idx + 1, e)
+                return f"[第{page_idx+1}页识别失败]"
+
+        log.info("[视觉管线] 开始识别%d页 (并发%d)...", total, max_workers)
+        t0 = time.time()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_describe_page, i): i for i in range(total)}
+            for future in concurrent.futures.as_completed(futures):
+                idx = futures[future]
+                page_results[idx] = future.result()
+                done = sum(1 for r in page_results if r is not None)
+                if done % 10 == 0 or done == total:
+                    log.info("[视觉管线] 进度 %d/%d", done, total)
+
+        elapsed = time.time() - t0
+        log.info("[视觉管线] 识别完成: %d页, %.1fs", total, elapsed)
+
+        # 4. 合并为Markdown
+        lines = []
+        for i, desc in enumerate(page_results):
+            lines.append(f"### 第{i+1}页\n")
+            lines.append(desc if desc else "[空白页]")
+            lines.append("")
+
+        md_text = "\n".join(lines)
+        log.info("[视觉管线] 输出 %d字符", len(md_text))
+        return md_text
+
+    finally:
+        # 清理临时目录
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
